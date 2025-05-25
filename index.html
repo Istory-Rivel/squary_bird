@@ -3,8 +3,9 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Flappy Bird</title>
+    <title>Squary Bird</title>
     <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/tone/14.8.49/Tone.js"></script>
     <style>
         body {
             display: flex;
@@ -132,6 +133,63 @@
     </div>
 
     <script>
+        // --- Sound Effects ---
+        // Create synth for sound effects
+        const flapSynth = new Tone.Synth({
+            oscillator: {
+                type: "triangle",
+                frequency: 220
+            },
+            envelope: {
+                attack: 0.005,
+                decay: 0.1,
+                sustain: 0,
+                release: 0.1
+            },
+            volume: -10
+        }).toDestination();
+
+        const gameOverSynth = new Tone.Synth({
+            oscillator: {
+                type: "sawtooth"
+            },
+            envelope: {
+                attack: 0.01,
+                decay: 0.3,
+                sustain: 0.1,
+                release: 0.3
+            },
+            volume: -15
+        }).toDestination();
+
+        const scoreSynth = new Tone.Synth({
+            oscillator: {
+                type: "sine"
+            },
+            envelope: {
+                attack: 0.01,
+                decay: 0.1,
+                sustain: 0.1,
+                release: 0.2
+            },
+            volume: -8
+        }).toDestination();
+
+        // Sound effect functions
+        function playFlapSound() {
+            flapSynth.triggerAttackRelease("G3", "16n");
+        }
+
+        function playGameOverSound() {
+            gameOverSynth.triggerAttackRelease("C4", "8n");
+            setTimeout(() => gameOverSynth.triggerAttackRelease("G3", "4n"), 150);
+        }
+
+        function playScoreSound() {
+            scoreSynth.triggerAttackRelease("E5", "16n");
+            setTimeout(() => scoreSynth.triggerAttackRelease("A5", "16n"), 50);
+        }
+
         // --- Game Setup ---
         const canvas = document.getElementById('gameCanvas');
         const ctx = canvas.getContext('2d');
@@ -205,15 +263,36 @@
 
         // --- Game Variables ---
         let birdX, birdY, birdVelocityY;
+        let birdRotation = 0;
+        let birdAngularVelocity = 0;
         let pipes = [];
         let score;
         let gameState; 
         let animationFrameId;
+        let isDying = false;
 
         let lastTime = 0;
         let groundOffset = 0;
         let timeToNextPipe = 0;
-        let birdFlapAnimationTimer = 0; 
+        let birdFlapAnimationTimer = 0;
+
+        // Impact effect variables
+        let impactFlashOpacity = 0;
+        let screenShakeTime = 0;
+        let screenShakeIntensity = 0;
+        const IMPACT_FLASH_DURATION = 100; // Duration in milliseconds
+        const SCREEN_SHAKE_DURATION = 200;
+        const INITIAL_SHAKE_INTENSITY = 10;
+
+        // Bird dying physics constants
+        const DEATH_BOUNCE_VELOCITY = -8;
+        const DEATH_ANGULAR_VELOCITY = 0.3;
+        const DEATH_GRAVITY = 0.5;
+        const DEATH_BOUNCE_DAMPING = 0.6;
+        const GROUND_COLLISION_THRESHOLD = 50; // Height of ground
+
+        // Add a new variable for tracking game over sequence
+        let gameOverSequenceActive = false;
 
         // Initialize background elements
         function initBackgroundElements() {
@@ -308,14 +387,15 @@
          */
         function drawBird() {
             ctx.save();
-            // Translate to bird's center for easier drawing
+            // Translate to bird's center for rotation
             ctx.translate(birdX, birdY);
+            ctx.rotate(birdRotation);
 
             // Main Body (Square)
             ctx.fillStyle = BIRD_BODY_COLOR;
             ctx.strokeStyle = BIRD_OUTLINE_COLOR;
             ctx.lineWidth = 2;
-            // Draw centered square: (x - size/2, y - size/2, size, size)
+            // Draw centered square
             ctx.fillRect(-BIRD_SIZE / 2, -BIRD_SIZE / 2, BIRD_SIZE, BIRD_SIZE);
             ctx.strokeRect(-BIRD_SIZE / 2, -BIRD_SIZE / 2, BIRD_SIZE, BIRD_SIZE);
 
@@ -515,6 +595,7 @@
                     score++;
                     pipe.passed = true;
                     scoreDisplay.textContent = `Score: ${score}`;
+                    playScoreSound();
                 }
             });
 
@@ -541,14 +622,16 @@
 
         // --- Collision Detection ---
         function checkCollisions() {
+            // Don't check collisions if already dying
+            if (isDying) return false;
+
             // Bird hits top or bottom (ground)
-            // Using BIRD_SIZE / 2 and BIRD_SIZE / 2 for collision, assuming bird is roughly centered
             const birdTop = birdY - BIRD_SIZE / 2;
             const birdBottom = birdY + BIRD_SIZE / 2;
             const birdLeft = birdX - BIRD_SIZE / 2;
             const birdRight = birdX + BIRD_SIZE / 2;
 
-            if (birdTop < 0 || birdBottom > canvas.height - 50) { // 50 for ground
+            if (birdTop < 0 || birdBottom > canvas.height - GROUND_COLLISION_THRESHOLD) {
                 return true;
             }
 
@@ -576,9 +659,12 @@
             birdX = canvas.width / 3;
             birdY = canvas.height / 2;
             birdVelocityY = 0;
+            birdRotation = 0;
+            birdAngularVelocity = 0;
             pipes = [];
             score = 0;
             gameState = 'start';
+            isDying = false;
 
             groundOffset = 0;
             
@@ -621,19 +707,78 @@
             }
         }
 
+        function startDyingAnimation() {
+            isDying = true;
+            birdVelocityY = DEATH_BOUNCE_VELOCITY;
+            birdAngularVelocity = DEATH_ANGULAR_VELOCITY;
+        }
+
+        function updateDyingBird(deltaTimeFactor) {
+            if (!isDying) return;
+
+            // Update rotation
+            birdRotation += birdAngularVelocity * deltaTimeFactor;
+
+            // Update position with increased gravity
+            birdVelocityY += DEATH_GRAVITY * deltaTimeFactor;
+            birdY += birdVelocityY * deltaTimeFactor;
+
+            // Bounce off ground with damping
+            if (birdY + BIRD_SIZE/2 > canvas.height - GROUND_COLLISION_THRESHOLD) {
+                birdY = canvas.height - GROUND_COLLISION_THRESHOLD - BIRD_SIZE/2;
+                if (Math.abs(birdVelocityY) > 1) {
+                    birdVelocityY = -birdVelocityY * DEATH_BOUNCE_DAMPING;
+                    // Reduce angular velocity on each bounce
+                    birdAngularVelocity *= DEATH_BOUNCE_DAMPING;
+                } else {
+                    birdVelocityY = 0;
+                    // Stop spinning when barely bouncing
+                    birdAngularVelocity = 0;
+                }
+            }
+
+            // If bird has stopped bouncing and is on the ground, end dying state
+            if (Math.abs(birdVelocityY) < 0.1 && 
+                birdY + BIRD_SIZE/2 >= canvas.height - GROUND_COLLISION_THRESHOLD - 1) {
+                isDying = false;
+                birdVelocityY = 0;
+                birdAngularVelocity = 0;
+            }
+        }
+
         function gameOver() {
+            if (gameOverSequenceActive) return;
+            gameOverSequenceActive = true;
+            
+            // Start dying animation
+            startDyingAnimation();
+            
+            // First trigger the visual and audio effects
+            triggerImpactEffect();
+            playGameOverSound();
+            
+            // Show game over UI immediately
             gameState = 'gameOver';
             finalScoreDisplay.textContent = `Your score: ${score}`;
             gameOverTitle.textContent = "Game Over!";
             messageBox.style.display = 'flex';
             instructionsDisplay.textContent = "Press Space or Click Restart!";
+            
+            // Set a timeout to end the dying animation
+            setTimeout(() => {
+                isDying = false;
+                gameOverSequenceActive = false;
+            }, 1500); // Maximum time for death animation
         }
 
         // --- Game Loop ---
         function gameLoop(currentTime) { 
-            if (gameState !== 'playing') {
-                 if (animationFrameId) cancelAnimationFrame(animationFrameId); 
-                 return;
+            // Always process at least one frame when game over sequence is active
+            if (gameState !== 'playing' && !gameOverSequenceActive && !isDying) {
+                if (animationFrameId) {
+                    cancelAnimationFrame(animationFrameId);
+                }
+                return;
             }
 
             if (!lastTime) { 
@@ -650,25 +795,42 @@
 
             const deltaTimeFactor = clampedRawDeltaTime / TIME_STEP;
 
-            birdVelocityY += GRAVITY * deltaTimeFactor;
-            birdY += birdVelocityY * deltaTimeFactor;
-            birdFlapAnimationTimer += clampedRawDeltaTime; 
+            // Only update game physics if we're still playing
+            if (gameState === 'playing' && !isDying) {
+                birdVelocityY += GRAVITY * deltaTimeFactor;
+                birdY += birdVelocityY * deltaTimeFactor;
+                birdFlapAnimationTimer += clampedRawDeltaTime; 
+                groundOffset += PIPE_SPEED * deltaTimeFactor; 
+                updatePipes(deltaTimeFactor, clampedRawDeltaTime); 
+                updateBackground(deltaTimeFactor);
 
-            groundOffset += PIPE_SPEED * deltaTimeFactor; 
-
-            updatePipes(deltaTimeFactor, clampedRawDeltaTime); 
-            updateBackground(deltaTimeFactor);
-
-            if (checkCollisions()) {
-                gameOver();
-                return;
+                // Only check collisions during gameplay
+                if (checkCollisions()) {
+                    gameOver();
+                }
+            } else if (isDying) {
+                updateDyingBird(deltaTimeFactor);
+                updateBackground(deltaTimeFactor);
             }
 
+            // Always update impact effects
+            updateImpactEffects(clampedRawDeltaTime);
+
             ctx.clearRect(0, 0, canvas.width, canvas.height);
+            
+            // Save the context state before applying effects
+            ctx.save();
+            
             drawBackground();
             drawPipes();
             drawGround();
             drawBird();
+            
+            // Draw impact effects on top
+            drawImpactEffects();
+            
+            // Restore the context state after effects
+            ctx.restore();
 
             animationFrameId = requestAnimationFrame(gameLoop);
         }
@@ -676,7 +838,8 @@
         // --- Event Listeners ---
         function handleInput() {
             if (gameState === 'playing') {
-                birdVelocityY = FLAP_STRENGTH; 
+                birdVelocityY = FLAP_STRENGTH;
+                playFlapSound();
             } else if (gameState === 'start' || gameState === 'gameOver') {
                 startGame();
             }
@@ -716,6 +879,41 @@
 
         // --- Initial Call ---
         initGame(); 
+
+        // Impact effect functions
+        function triggerImpactEffect() {
+            impactFlashOpacity = 1;
+            screenShakeTime = SCREEN_SHAKE_DURATION;
+            screenShakeIntensity = INITIAL_SHAKE_INTENSITY;
+        }
+
+        function updateImpactEffects(deltaTime) {
+            // Update flash opacity
+            if (impactFlashOpacity > 0) {
+                impactFlashOpacity = Math.max(0, impactFlashOpacity - (deltaTime / IMPACT_FLASH_DURATION));
+            }
+
+            // Update screen shake
+            if (screenShakeTime > 0) {
+                screenShakeTime = Math.max(0, screenShakeTime - deltaTime);
+                screenShakeIntensity = (screenShakeTime / SCREEN_SHAKE_DURATION) * INITIAL_SHAKE_INTENSITY;
+            }
+        }
+
+        function drawImpactEffects() {
+            // Apply screen shake
+            if (screenShakeTime > 0) {
+                const shakeX = (Math.random() - 0.5) * screenShakeIntensity;
+                const shakeY = (Math.random() - 0.5) * screenShakeIntensity;
+                ctx.translate(shakeX, shakeY);
+            }
+
+            // Draw flash overlay
+            if (impactFlashOpacity > 0) {
+                ctx.fillStyle = `rgba(255, 255, 255, ${impactFlashOpacity})`;
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+            }
+        }
     </script>
 </body>
 </html>
